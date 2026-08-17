@@ -437,7 +437,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-drop-ratio", type=float,
-        default=float(os.environ.get("MAX_DROP_RATIO", "0.5")),
+        default=float(os.environ.get("MAX_DROP_RATIO") or "0.5"),
         help="Fail if the event count drops by more than this fraction vs baseline "
              "(default 0.5; set 1 to disable).",
     )
