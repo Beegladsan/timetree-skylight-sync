@@ -1,0 +1,28 @@
+name: List TimeTree calendars
+
+# Manual helper: run this once from the Actions tab to discover the id/code/name
+# of your calendars, then set the TIMETREE_CALENDAR_ID secret. Prints to the run
+# log only (visible just to repo admins); publishes nothing.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: List calendars
+        env:
+          TIMETREE_SESSION_ID: ${{ secrets.TIMETREE_SESSION_ID }}
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+        run: python sync.py --list-calendars

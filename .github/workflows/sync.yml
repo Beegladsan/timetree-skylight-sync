@@ -1,0 +1,121 @@
+name: TimeTree to Skylight sync
+
+on:
+  schedule:
+    # Twice daily, in UTC. GitHub cron is always UTC; adjust to taste.
+    # (06:00 and 18:00 UTC). To change cadence, edit/add/remove lines here.
+    - cron: "0 6 * * *"
+    - cron: "0 18 * * *"
+  workflow_dispatch: {} # manual "Run workflow" button
+
+# Never run two syncs at once, and never cancel an in-flight publish.
+concurrency:
+  group: timetree-sync
+  cancel-in-progress: false
+
+# Least privilege: read the repo, write to Pages, open an issue on failure.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  issues: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate and validate feed
+        env:
+          # Credentials: provide EITHER a session token OR email+password.
+          TIMETREE_SESSION_ID: ${{ secrets.TIMETREE_SESSION_ID }}
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+          # Which calendar to export (numeric id, alias code, or exact name).
+          TIMETREE_CALENDAR_ID: ${{ secrets.TIMETREE_CALENDAR_ID }}
+          # Unguessable path segment for the feed URL (kept secret).
+          FEED_SLUG: ${{ secrets.FEED_SLUG }}
+          # Non-secret display + tuning values (repo Variables).
+          FEED_NAME: ${{ vars.FEED_NAME }}
+          MAX_DROP_RATIO: ${{ vars.MAX_DROP_RATIO }}
+          # Set this AFTER the first successful deploy to enable the drop-guard
+          # (e.g. https://<you>.github.io/<repo>). Optional.
+          PAGES_BASE_URL: ${{ vars.PAGES_BASE_URL }}
+        run: |
+          set -euo pipefail
+          SLUG="${FEED_SLUG:-calendar}"
+          OUT="_site/feed/${SLUG}/calendar.ics"
+
+          BASELINE=""
+          if [ -n "${PAGES_BASE_URL:-}" ]; then
+            BASELINE="${PAGES_BASE_URL%/}/feed/${SLUG}/calendar.ics"
+          fi
+
+          python sync.py \
+            --output "$OUT" \
+            --name "${FEED_NAME:-TimeTree}" \
+            --baseline-url "$BASELINE" \
+            ${MAX_DROP_RATIO:+--max-drop-ratio "$MAX_DROP_RATIO"}
+
+          # Neutral root page so the site root isn't a 404 and doesn't leak the slug.
+          printf '<!doctype html><meta charset="utf-8"><title>calendar</title><p>ok</p>\n' \
+            > _site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    # Only runs if `build` succeeded. A failed/partial generation therefore never
+    # overwrites the previously published (good) feed.
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  notify-failure:
+    # Loud, infra-free failure signal: GitHub already emails the actor on a failed
+    # run; this also opens/updates a persistent tracking issue.
+    needs: [build, deploy]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "⚠️ TimeTree → Skylight sync failed";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              "The scheduled TimeTree → Skylight sync failed.",
+              "",
+              `Run log: ${runUrl}`,
+              "",
+              "The previously published feed was left untouched (the deploy step only",
+              "runs on success). See the runbook section \"If the feed stops updating\".",
+            ].join("\n");
+            const issues = await github.rest.issues.listForRepo({
+              ...context.repo, state: "open", per_page: 100,
+            });
+            const found = issues.data.find((i) => i.title === title);
+            if (found) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: found.number, body,
+              });
+            } else {
+              await github.rest.issues.create({ ...context.repo, title, body });
+            }

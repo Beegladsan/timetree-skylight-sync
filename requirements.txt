@@ -1,0 +1,8 @@
+# Pinned for reproducible CI runs.
+# timetree-exporter owns the reverse-engineered TimeTree web API (auth,
+# chunked pagination, event model, VEVENT/RRULE/VTIMEZONE conversion).
+timetree-exporter==0.8.0
+icalendar==7.2.2
+requests==2.34.2
+# tzdata floats so scheduled runs pick up the latest IANA DST rules.
+tzdata>=2025.2

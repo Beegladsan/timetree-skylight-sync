@@ -1,0 +1,10 @@
+# Generated feed output (published to Pages, never committed)
+_site/
+
+# Local secrets — NEVER commit
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
