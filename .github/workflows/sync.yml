@@ -4,8 +4,7 @@ on:
   schedule:
     # Twice daily, in UTC. GitHub cron is always UTC; adjust to taste.
     # (06:00 and 18:00 UTC). To change cadence, edit/add/remove lines here.
-    - cron: "0 6 * * *"
-    - cron: "0 18 * * *"
+      - cron: "0 */6 * * *"
   workflow_dispatch: {} # manual "Run workflow" button
 
 # Never run two syncs at once, and never cancel an in-flight publish.
