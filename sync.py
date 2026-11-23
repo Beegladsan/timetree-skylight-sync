@@ -210,39 +210,110 @@ def select_calendar(api: TimeTreeCalendar, selector: str) -> Calendar:
     return Calendar(api, meta)
 
 
+def select_calendars(
+    api: TimeTreeCalendar,
+    selectors: list[str] | None = None,
+    all_calendars: bool = False,
+) -> list[Calendar]:
+    """Resolve one or more calendars to export and merge into a single feed.
+
+    With ``all_calendars`` true, returns every active calendar on the account.
+    Otherwise each entry in ``selectors`` (an id, alias code, or exact name) is
+    resolved and the results are merged, de-duplicated by calendar id.
+    """
+    active = load_calendars(api)
+    if not active:
+        raise SyncError("No active TimeTree calendars found on this account.")
+
+    if all_calendars:
+        chosen = list(active)
+    else:
+        chosen = []
+        seen: set = set()
+        for raw in selectors or []:
+            selector = str(raw).strip()
+            if not selector:
+                continue
+            matches = [
+                m for m in active
+                if selector in {str(m.get("id")), str(m.get("alias_code")), str(m.get("name"))}
+            ]
+            if not matches:
+                raise SyncError(
+                    f"No calendar matched {selector!r}.\nAvailable calendars:\n"
+                    f"{_format_calendar_listing(active)}"
+                )
+            for m in matches:
+                if m.get("id") not in seen:
+                    seen.add(m.get("id"))
+                    chosen.append(m)
+        if not chosen:
+            raise SyncError("No calendar selected.")
+
+    for m in chosen:
+        log.info("Including calendar: %r (id=%s, code=%s)", m.get("name"), m.get("id"),
+                 m.get("alias_code"))
+    return [Calendar(api, m) for m in chosen]
+
+
 # --------------------------------------------------------------------------- #
 # Feed construction
 # --------------------------------------------------------------------------- #
-def build_feed(calendar: Calendar, feed_name: str) -> tuple[bytes, int, int]:
-    """Fetch + convert one calendar into serialized .ics bytes.
+def build_feed(calendars: list[Calendar], feed_name: str) -> tuple[bytes, int, int]:
+    """Fetch + convert one or more calendars into a single serialized .ics feed.
 
     Returns (ics_bytes, fetched_event_count, published_vevent_count).
+    Events from every calendar are merged and de-duplicated by TimeTree uuid.
     Pagination (chunk/since) is handled inside the library; a partial-page
-    failure surfaces here as an exception rather than a silent truncation.
+    failure surfaces here as an exception rather than a silent truncation, and
+    if ANY calendar fails to fetch the whole run fails (so a broken partial feed
+    never overwrites a good one).
     """
-    try:
-        events = calendar.get_events()
-    except HTTPError as exc:
-        raise SyncError(
-            "Failed to fetch events (auth/session invalid, or TimeTree API changed)."
-        ) from exc
-    except RequestException as exc:
-        raise SyncError(f"Network error fetching events: {exc}") from exc
-    except (KeyError, ValueError, TypeError) as exc:
-        raise SyncError(
-            f"Events response was missing expected fields (TimeTree API may have changed): {exc}"
-        ) from exc
+    all_events: list = []
+    merged_labels: dict = {}
+    seen_uuids: set = set()
 
-    fetched = len(events)
-    log.info("Fetched %d raw events (pagination complete) from %r.", fetched, calendar.name)
+    for calendar in calendars:
+        try:
+            events = calendar.get_events()
+        except HTTPError as exc:
+            raise SyncError(
+                f"Failed to fetch events for calendar {calendar.name!r} "
+                "(auth/session invalid, or TimeTree API changed)."
+            ) from exc
+        except RequestException as exc:
+            raise SyncError(
+                f"Network error fetching events for {calendar.name!r}: {exc}"
+            ) from exc
+        except (KeyError, ValueError, TypeError) as exc:
+            raise SyncError(
+                f"Events response for {calendar.name!r} was missing expected fields "
+                f"(TimeTree API may have changed): {exc}"
+            ) from exc
 
-    try:
-        labels = calendar.get_labels()
-    except Exception as exc:  # labels are cosmetic (CATEGORIES); never fail the run over them
-        log.warning("Could not fetch labels (continuing without them): %s", exc)
-        labels = {}
+        added = 0
+        for event in events:
+            uid = event.get("uuid")
+            if uid and uid in seen_uuids:
+                continue  # same event shared across calendars — keep one copy
+            if uid:
+                seen_uuids.add(uid)
+            all_events.append(event)
+            added += 1
+        log.info("Fetched %d events from %r (%d new after de-dup).",
+                 len(events), calendar.name, added)
 
-    cal = build_single_calendar(events, labels)
+        try:
+            labels = calendar.get_labels()
+            if labels:
+                merged_labels.update(labels)
+        except Exception as exc:  # labels are cosmetic (CATEGORIES); never fail over them
+            log.warning("Could not fetch labels for %r (continuing): %s", calendar.name, exc)
+
+    fetched = len(all_events)
+    log.info("Merged %d event(s) across %d calendar(s).", fetched, len(calendars))
+
+    cal = build_single_calendar(all_events, merged_labels)
     _apply_calendar_headers(cal, feed_name)
     # RFC 5545 requires VALUE=DATE on all-day DTSTART/DTEND. The upstream library
     # emits a bare date (no param), which strict parsers reject as an invalid
@@ -422,8 +493,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--calendar",
         default=os.environ.get("TIMETREE_CALENDAR_ID"),
-        help="Calendar to export: numeric id, alias code, or exact name "
+        help="Calendar(s) to export: numeric id, alias code, or exact name. "
+             "Accepts a comma-separated list to merge several "
              "(default: $TIMETREE_CALENDAR_ID).",
+    )
+    parser.add_argument(
+        "--all-calendars", action="store_true", default=_env_flag("TIMETREE_ALL_CALENDARS"),
+        help="Export ALL of the account's active calendars, merged into one feed "
+             "(default from $TIMETREE_ALL_CALENDARS). Overrides --calendar.",
     )
     parser.add_argument(
         "--list-calendars", action="store_true",
@@ -474,14 +551,19 @@ def main(argv: list[str] | None = None) -> int:
         print(_format_calendar_listing(load_calendars(api)))
         return 0
 
-    if not args.calendar:
-        raise SyncError(
-            "No calendar selected. Set TIMETREE_CALENDAR_ID (or pass --calendar). "
-            "Run with --list-calendars to see the options."
-        )
+    if args.all_calendars:
+        calendars = select_calendars(api, all_calendars=True)
+    else:
+        if not args.calendar:
+            raise SyncError(
+                "No calendar selected. Set TIMETREE_CALENDAR_ID (or pass --calendar), "
+                "or set TIMETREE_ALL_CALENDARS=1 to export every calendar. "
+                "Run with --list-calendars to see the options."
+            )
+        selectors = str(args.calendar).split(",")
+        calendars = select_calendars(api, selectors=selectors)
 
-    calendar = select_calendar(api, str(args.calendar))
-    ics_bytes, fetched, published = build_feed(calendar, args.name)
+    ics_bytes, fetched, published = build_feed(calendars, args.name)
     validated = validate_ics(ics_bytes, allow_empty=args.allow_empty)
 
     baseline = fetch_baseline_vevent_count(args.baseline_url)
@@ -490,8 +572,8 @@ def main(argv: list[str] | None = None) -> int:
     status = {
         "tool": TOOL_NAME,
         "generated_at_utc": started.isoformat(),
-        "calendar_name": calendar.name,
-        "calendar_id": str(calendar.id),
+        "calendars": [{"name": c.name, "id": str(c.id)} for c in calendars],
+        "calendar_count": len(calendars),
         "fetched_events": fetched,
         "published_events": validated,
         "baseline_events": baseline,
@@ -502,8 +584,8 @@ def main(argv: list[str] | None = None) -> int:
     write_outputs(ics_bytes, Path(args.output), status)
 
     log.info(
-        "SUCCESS: calendar=%r fetched=%d published=%d baseline=%s",
-        calendar.name, fetched, validated, baseline,
+        "SUCCESS: %d calendar(s) fetched=%d published=%d baseline=%s",
+        len(calendars), fetched, validated, baseline,
     )
     return 0
 

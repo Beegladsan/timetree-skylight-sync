@@ -40,7 +40,10 @@ jobs:
           TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
           TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
           # Which calendar to export (numeric id, alias code, or exact name).
+          # Ignored while TIMETREE_ALL_CALENDARS is on (below).
           TIMETREE_CALENDAR_ID: ${{ secrets.TIMETREE_CALENDAR_ID }}
+          # Pull EVERY calendar on the account into one merged feed.
+          TIMETREE_ALL_CALENDARS: "1"
           # Unguessable path segment for the feed URL (kept secret).
           FEED_SLUG: ${{ secrets.FEED_SLUG }}
           # Non-secret display + tuning values (repo Variables).

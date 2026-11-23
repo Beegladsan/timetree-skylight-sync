@@ -1,0 +1,22 @@
+name: Keepalive
+
+# Keeps the scheduled TimeTree -> Skylight sync from being auto-disabled.
+# GitHub pauses scheduled workflows after 60 days with no commits to the repo.
+# This runs weekly and, once the repo has been quiet for ~45 days, makes a tiny
+# commit so the repo stays active -- so the sync never pauses and you never have
+# to re-arm it by hand.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"   # Mondays 07:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gautamkrishnar/keepalive-workflow@v2
